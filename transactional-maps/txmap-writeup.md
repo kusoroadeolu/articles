@@ -2,7 +2,7 @@
 - Date Written: Thursday, February 26, 2026. 
 
 ## Writeup
-The goal of this writeup isn't necessarily to sell the idea of in memory transactional maps to you, but rather document my findings about the different strategies of transactional maps I implemented in [this repo](https://github.com/kusoroadeolu/tx-map)
+The goal of this writeup isn't necessarily to sell the idea of in memory transactional maps to you, but rather document my findings about the 5-6 different strategies involving transactional maps I implemented in [this repo](https://github.com/kusoroadeolu/tx-map)
 Before we continue, the main idea of transactional collections/maps, is to allow developers to achieve similar performance in large atomic regions as they would by interleaving multiple operations in mutual exclusion based primitives, while providing atomicity and different isolation levels based on preferences.
 With that said, lets get into it
 
@@ -10,7 +10,7 @@ With that said, lets get into it
 ## Introduction
 I initially started building these transactional maps with only a single implementation which was an optimistic like transactional map with semantic concurrency control. I got most of the ideas of this from this [paper](https://people.csail.mit.edu/mcarbin/papers/ppopp07.pdf). 
 The main idea was pretty clear: **transactional semantics for a map using optimistic concurrency control**. However, the paper assumed the reader/implementor had an underlying STM (Software Transactional Memory) runtime, hence, all the talk about rollbacks, aborts, open-nested, closed-nested transactions and memory level conflicts that the STM runtime handled for them.
-Most of the ideas presented by the paper were very smart, and a lot of the ideas were transferred into a good number of the transactional maps I built, however there were a lot of significant limitations which prevented me from making a near 1:1 copy of what the paper suggested and honestly what I initially planned to do. 
+Most of the ideas presented by the paper were very smart, and a lot of the ideas were implemented in a good number of the transactional maps I built, however there were a lot of significant limitations which prevented me from making a near 1:1 copy of what the paper suggested and honestly what I initially planned to do. 
 These limitations, rather than being roadblocks, ended up pushing me to explore different synchronization strategies and ultimately build 5 distinct transactional map implementations, each with their own tradeoffs.
 
 ## Transactional Map Implementations
