@@ -16,14 +16,14 @@ These limitations, rather than being roadblocks, ended up pushing me to explore 
 ## Transactional Map Implementations
 1. **Optimistic Transactional Map:** At first glance, the name of this map could imply that this map carries out optimistic reads, however, the transactional semantics of the map are quite different. 
 Before I explain the map's semantics, this map's commit phase is split into two, validation and commit. During validation, the transaction tries to acquire all semantically meaningful locks for the transaction i.e. if a put operation for key, already has a value for that key in the map, the contains key nor size lock is acquired.
-This transactional map's semantics require readers eagerly stating their intent by acquiring read locks for their semantics at scheduled time(before commits). Writes however lazily state their intent and are serialized through one lock per key. This map promises **READ COMMITTED** isolation levels.
+This transactional map's semantics require readers eagerly stating their intent by acquiring read locks for their semantics at scheduled time(before commits). Writes however lazily state their intent and are serialized through one lock per key. This map promises **READ COMMITTED** isolation levels across the entire map but **SERIALIZED** isolation levels per key when writes are involved , meaning no dirty reads can ever happen on any key in the map, and repeatable or phantom reads are impossible per key.
 
-2. **Pessimistic Transactional Map:** This transactional map's semantics require readers lazily stating their intent by incrementing an atomic counter at validation time. Writes however are serialized through one lock per key and lazily state their intent This map promises **READ COMMITTED** isolation levels. 
+2. **Pessimistic Transactional Map:** This transactional map's semantics require readers lazily stating their intent by incrementing an atomic counter at validation time. Writes however are serialized through one lock per key and lazily state their intent. This map also promises **READ COMMITTED** isolation levels across the entire map but **SERIALIZED** isolation levels per key 
 **NOTE:** For both optimistic and pessimistic maps, writers block readers and readers block writers, but readers never block each other.
 
-3. **Read Uncommitted Transactional Map:** This transactional map's semantics do not require readers stating their intent at all. Writes however are still serialized through one lock per key and lazily state their intent. This map promises **READ UNCOMMITTED** isolation levels, meaning transactions can read data by transactions not fully committed yet. In the [paper](https://people.csail.mit.edu/mcarbin/papers/ppopp07.pdf), this is regarded as an **open-nested** transaction.
+3. **Read Uncommitted Transactional Map:** This transactional map's semantics do not require readers stating their intent at all. Writes however are still serialized through one lock per key and lazily state their intent. This map promises **READ UNCOMMITTED** isolation levels, meaning transactions can read data by transactions not fully committed yet i.e. Dirty reads. In the [paper](https://people.csail.mit.edu/mcarbin/papers/ppopp07.pdf), this is regarded as an **open-nested** transaction.
 
-4. **Copy On Write Transactional Map:** This transactional map's semantics can be linked closely to that of **CopyOnWriteArrayList**. This copies the last seen map reference onto it's thread stack, if the map on the stack was modified, it tries to replace the shared map reference using CAS, if it fails, it recopies to map, modifies and tries to cas until it succeeds. This map promises **READ COMMITTED** isolation levels
+4. **Copy On Write Transactional Map:** This transactional map's semantics can be linked closely to that of **CopyOnWriteArrayList**. This copies the last seen map reference onto it's thread stack, if the map on the stack was modified, it tries to replace the shared map reference using CAS, if it fails, it recopies to map, modifies and tries to cas until it succeeds. This map promises **READ COMMITTED** isolation levels across the entire map. Repeatable and phantom reads are possible if you read a value, another thread commits, and you read again, you might see the new value
 
 5. **Flat Combined Transactional Map:** I wanted to see how a fully serialized approach would compare, which led me to flat combining.
 
@@ -65,8 +65,8 @@ And for the optimistic transactional map, the story is similar to that of pessim
 Read uncommitted implementation's performance is more balanced with throughput growing from ~2.0M ops/s at 1 thread to ~3.1M at 8 threads compared to the others, though it offers much weaker isolation guarantees compared to the previous three.
 
 ### Write Heavy
-![Write Heavy - 1 Thread](https://docs.google.com/spreadsheets/d/e/2PACX-1vQCZMJbJvC9LBh-MxqySWYzYu_FaZ5z2hAX2eQyxyzRh_QEvyBJcoQrWem-sMDmwYjZzxN1XQjZcHtD/pubchart?oid=163750456&amp;format=image)
-![Write Heavy - 8 Threads](https://docs.google.com/spreadsheets/d/e/2PACX-1vQCZMJbJvC9LBh-MxqySWYzYu_FaZ5z2hAX2eQyxyzRh_QEvyBJcoQrWem-sMDmwYjZzxN1XQjZcHtD/pubchart?oid=1125040673&amp;format=image)
+![Write Heavy - 1 Thread](https://docs.google.com/spreadsheets/d/e/2PACX-1vQCZMJbJvC9LBh-MxqySWYzYu_FaZ5z2hAX2eQyxyzRh_QEvyBJcoQrWem-sMDmwYjZzxN1XQjZcHtD/pubchart?oid=1590911224&amp;format=image)
+![Write Heavy - 8 Threads](https://docs.google.com/spreadsheets/d/e/2PACX-1vQCZMJbJvC9LBh-MxqySWYzYu_FaZ5z2hAX2eQyxyzRh_QEvyBJcoQrWem-sMDmwYjZzxN1XQjZcHtD/pubchart?oid=1945883913&amp;format=image)
 
 Copy on Write's throughput drops ~60% from 1 thread 2.4M ops/s to 8 threads 941K ops/s.Unlike reads, write operations cause multiple CAS retries and the over head of recopying the shared map on each retry under high contention becomes a big bottleneck.
 
