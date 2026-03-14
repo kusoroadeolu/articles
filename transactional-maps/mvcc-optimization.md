@@ -32,7 +32,7 @@ long findMinActiveEpoch(){
 
 This line of code caused an OOME under contention the active given the fact the active transactions map could be very large, if we’re copying and iterating it anytime we want to prune an old version, issues would occur. To fix this, I used a single writer that automatically tracks the minimum visible epoch(tBegin) from all active transactions in the set. The main tradeoff with this was that under contention the single writer could not keep up, but it was better than copying the map on every write transaction.
 
-However, write throughput dropped to ~20k ops/s after the single writer fix, so I profiled to find out why. The culprit was ActiveTransactions#remove. Instead of submitting a remove request to the queue, it was removing a non-existent entry, meaning every transaction commit was doing an O(N) traversal for nothing. And since nothing was actually being removed from the map, minTBegin never advanced, so the GC epoch reclamation was doing meaningless work the entire time. Fixing this brought numbers back to a reasonable range.
+However, write throughput dropped to ~20k ops/s after the single writer fix, so I profiled to find out why. The culprit was SerialTransactionKeeper#remove. Instead of submitting a remove request to the queue, it was removing a non-existent entry, meaning every transaction commit was doing an O(N) traversal for nothing. And since nothing was actually being removed from the map, the `minVisibleEpoch` never advanced, so the GC epoch reclamation was doing meaningless work the entire time. Fixing this brought numbers back to a reasonable range.
 
 **Before**
 
@@ -74,7 +74,7 @@ After another round of profiling, I realized that I was making `findOverlap()` c
 | writeHeavy_4threads | thrpt | 10 | 836,488.562 | ± 80,008.830 | ops/s |
 | writeHeavy_8threads | thrpt | 10 | 979,821.239 | ± 89,332.281 | ops/s |
 
-After looking through my code again, I realized I never actually started the worker thread for my `ActiveTransactions` class, so i decided to start it and I was basically back at the beginning
+After looking through my code again, I realized I never actually started the worker thread for my `SerialTransactionKeeper` class, I realized I never actually started the thread. After starting the thread and benchmarking again I was basically back to square one
 
 | Benchmark | Mode | Cnt | Score | Error | Units |
 |---|---|---|---|---|---|
@@ -143,7 +143,7 @@ My scaling basically inverted with my lowest thrpt for both operations being at 
 
 I then realized that I'd been using my virtual threads as my background worker threads which is a terrible idea and was probably contributing the high variance, so I decided to run with my background worker threads as platform threads instead
 
-**Segmented Active Txn Keeper**
+**Segmented Transaction Keeper**
 
 | Benchmark | Mode | Cnt | Score | Error | Units |
 |---|---|---|---|---|---|
@@ -156,7 +156,7 @@ I then realized that I'd been using my virtual threads as my background worker t
 | writeHeavy_4threads | thrpt | 10 | 864,819.719 | ± 159,350.383 | ops/s |
 | writeHeavy_8threads | thrpt | 10 | 1,120,983.469 | ± 783,465.405 | ops/s |
 
-**Active Txn Keeper**
+**Serial Transaction Keeper**
 
 | Benchmark | Mode | Cnt | Score | Error | Units |
 |---|---|---|---|---|---|
@@ -228,6 +228,7 @@ Now that reads for minimum active epochs were scheduled, cached and off the hotp
 After looking at my queue version chain, I realized calling `size()` to check version chain depth on each write txn was killing perf, since we had to scan the whole queue to find the size(even with the queue's dead nodes) and restart from the head if we reached a dead node, so I decided to use a long adder to track the approx size for cheaper `size()` calls
 
 **Queue version chain**
+
 | Benchmark | Mode | Cnt | Score | Error | Units |
 |---|---|---|---|---|---|
 | readHeavy_1thread | thrpt | 10 | 2,290,892.594 | ± 491,972.988 | ops/s |
