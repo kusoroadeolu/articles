@@ -1,7 +1,4 @@
-# Transactional Maps
-- Date Written: Friday, March 13, 2026.
-
-## Introduction
+# Introduction
 This post walks through the performance journey of an MVCC transactional map I've been building in Java, from a few thousand ops/s to a few million. It's mostly numbers and profiling observations, so if that's not your thing, fair warning.
 
 ## The Journey
@@ -32,7 +29,7 @@ long findMinActiveEpoch(){
 
 This line of code caused an OOME under contention the active given the fact the active transactions map could be very large, if we’re copying and iterating it anytime we want to prune an old version, issues would occur. To fix this, I used a single writer that automatically tracks the minimum visible epoch(tBegin) from all active transactions in the set. The main tradeoff with this was that under contention the single writer could not keep up, but it was better than copying the map on every write transaction.
 
-However, write throughput dropped to ~20k ops/s after the single writer fix, so I profiled to find out why. The culprit was SerialTransactionKeeper#remove. Instead of submitting a remove request to the queue, it was removing a non-existent entry, meaning every transaction commit was doing an O(N) traversal for nothing. And since nothing was actually being removed from the map, the `minVisibleEpoch` never advanced, so the GC epoch reclamation was doing meaningless work the entire time. Fixing this brought numbers back to a reasonable range.
+However, write throughput dropped to ~20k ops/s after the single writer fix, so I profiled to find out why. The culprit was `SerialTransactionKeeper#remove`. Instead of submitting a remove request to the queue, it was removing a non-existent entry, meaning every transaction commit was doing an O(N) traversal for nothing. And since nothing was actually being removed from the map, the `minVisibleEpoch` never advanced, so the GC epoch reclamation was doing meaningless work the entire time. Fixing this brought numbers back to a reasonable range.
 
 **Before**
 
@@ -74,7 +71,7 @@ After another round of profiling, I realized that I was making `findOverlap()` c
 | writeHeavy_4threads | thrpt | 10 | 836,488.562 | ± 80,008.830 | ops/s |
 | writeHeavy_8threads | thrpt | 10 | 979,821.239 | ± 89,332.281 | ops/s |
 
-After looking through my code again, I realized I never actually started the worker thread for my `SerialTransactionKeeper` class, I realized I never actually started the thread. After starting the thread and benchmarking again I was basically back to square one
+After looking through my code again, I realized I never actually started the worker thread for my `SerialTransactionKeeper` class. After starting the thread and benchmarking again I was basically back to square one
 
 | Benchmark | Mode | Cnt | Score | Error | Units |
 |---|---|---|---|---|---|
@@ -113,7 +110,7 @@ As a minor optimization, I decided to cache the `minVisibleEpoch` timestamp in m
 | writeHeavy_4threads | thrpt | 10 | 944,841.844 | ± 321,298.094 | ops/s |
 | writeHeavy_8threads | thrpt | 10 | 764,114.028 | ± 472,135.579 | ops/s |
 
-Looking at my profiled data again, I realized submitting requests to the GC thread was still a hotspot, so I decided to spread out the frequency in which requests are submitted
+Looking at my profiled data again, I realized submitting requests to the GC thread was still a hotspot, so I decided to spread out the frequency in which requests are submitted by only submitting cleanup requests when `depth % threshold == 0` rather than every time `depth > threshold`, spacing out GC cleanup submissions across writes
 
 | Benchmark | Mode | Cnt | Score | Error | Units |
 |---|---|---|---|---|---|
@@ -170,7 +167,7 @@ I then realized that I'd been using my virtual threads as my background worker t
 | writeHeavy_8threads | thrpt | 10 | 927,350.663 | ± 194,550.049 | ops/s |
 
 
-Moving on from that minor hiccup, I decided to change my strategy for version tracking to use map based epoch tracking rather than a single writer background thread since I noticed it became a bottle neck, and these the results improved significantly, but oddly, at 2 threads, the thrpt is very bad. Still have no idea why this happened.
+Moving on from that minor hiccup, I decided to change my strategy for version tracking to use map based epoch tracking rather than a single writer background thread since I noticed it became a bottleneck, and the results improved significantly, but oddly, at 2 threads, the thrpt is very bad. No idea why this is happening.
 
 | Benchmark | Mode | Cnt | Score | Error | Units |
 |---|---|---|---|---|---|
@@ -183,7 +180,7 @@ Moving on from that minor hiccup, I decided to change my strategy for version tr
 | writeHeavy_4threads | thrpt | 10 | 118,490.002 | ± 21,500.755 | ops/s |
 | writeHeavy_8threads | thrpt | 10 | 5,211,745.483 | ± 672,226.456 | ops/s |
 
-To find the issue, I looked at my profile data, and found `minVisibleEpoch()` as a hotspot at 2 threads. The current issue is we scan the entire map for the min active epoch, ideally this shouldn't take too long but as the map grows, could become a bottle neck
+To find the issue, I looked at my profile data, and found `minVisibleEpoch()` as a hotspot at 2 threads. The current issue is we scan the entire map for the min active epoch, ideally this shouldn't take too long but as the map grows, could become a bottleneck
 
 I then decided to use a navigable map for cheaper reads at the cost of writes being more expensive, and my data actually improved a lot, with stable variance across all thread counts
 
@@ -212,7 +209,7 @@ I moved `minVisibleEpoch()` reads off the writer transaction path by caching and
 | writeHeavy_8threads | thrpt | 10 | 1,133,963.803 | ± 371,369.242 | ops/s |
 
 
-Now that reads for minimum active epochs were scheduled, cached and off the hotpath, I decided to move back to a normal concurrent hashmap, and compare results
+Now that reads for minimum active epochs were scheduled, cached and off the hotpath, I decided to move back to a normal concurrent hashmap and compare results
 
 | Benchmark | Mode | Cnt | Score | Error | Units |
 |---|---|---|---|---|---|
@@ -257,7 +254,8 @@ This was a meaningful shift from the previous DefaultEpochTracker, which tracked
 | writeHeavy_4threads | thrpt | 10 | 1,340,979.654 | ± 316,184.797 | ops/s |
 | writeHeavy_8threads | thrpt | 10 | 1,519,457.062 | ± 700,083.591 | ops/s |
 
-The variance was actually worse in some scenarios, sometimes ~70% of the actual score. Rerunning these benchmarks, I noticed something odd looking at my profile data for memory allocation, a lot of memory was getting allocated but barely cleaned up by the GC while running my benchmarks, leading to high variance and my numbers tanking in unusual ways during benchmarking. The profile data showed most of this occurred when I started a transaction which wasn't too helpful. So I decided to look at my actual memory usage when running these benchmarks and I noticed around 95% of my memory was being used while running these benchmarks.
+The variance was actually worse in some scenarios, sometimes >30% of the actual score. Rerunning these benchmarks, I noticed something odd looking at my profile data for memory allocation, a lot of memory was getting allocated but barely cleaned up by the GC while running my benchmarks, leading to high variance and my numbers tanking in unusual ways during benchmarking. The profile data showed most of this occurred when I started a transaction which wasn't too helpful. So I decided to look at my actual memory usage when running these benchmarks and I noticed around 95% of my memory was being used while running these benchmarks.
+
 My first suspect were my version chains, since stale versions might not be cleaned up by the GC. I decided to write a simple unit test(no idea why I didn't test my version chains earlier) to see if versions were being cleaned up, and they actually were not. The issue lied in a simple check I added earlier to prevent redundant O(N) lookups
 
 ```java
@@ -326,7 +324,7 @@ I was still a bit skeptical about the variance, even though it was pretty reason
 | writeHeavy_8threads | queue | thrpt | 10 | 2,274,919.824 | ± 46,946.253 | ops/s |
 | writeHeavy_8threads | nav | thrpt | 10 | 1,893,349.970 | ± 213,244.636 | ops/s |
 
-The thrpt was alright, though after some research I found out about a generics trick, using primitive arrays as generic types, so instead of boxed long values. I decided to try this out with CHM and compare it to the serialized long2long version
+The thrpt was great, though after some research I found out about a generic trick, using primitive arrays as generic types, so instead of boxed long values. I decided to try this out with CHM and compare it to the serialized long2long version
 ```java
 ConcurrentMap<Long, Long> map //Instead of this, we could do
 ConcurrentMap<Long, long[]> map //No boxing for values
@@ -373,10 +371,10 @@ Since, I've been testing thrpt for my mvcc map for "best case scenarios" i.e. no
 | writeHeavy_8threads | queue | thrpt | 10 | 1,800,086.692 | ± 403,405.040 | ops/s |
 | writeHeavy_8threads | nav | thrpt | 10 | 1,028,280.423 | ± 285,679.830 | ops/s |
 
-To fully understand this drop on the write heavy bench I compared profile data from this benchmark to those without retries. While everything looked 'similarish' on the CPU side, memory was a different story with memory usage spiking up from ~16GB to almost ~30GB at every iteration. Due to the frequency of aborts, for each retry, a new txn object had to be created, meaning more memory allocated for the txn object, its read/write operation objects and its completable values, hence more pressure on the GC(Java's GC), more GC pauses, lower thrpt and higher variance.
-
+To fully understand this drop on the write heavy bench I compared profile data from this benchmark to those without retries. While everything looked 'similarish' on the CPU side, memory was a different story with memory usage spiking up from ~16GB to almost ~30GB at every iteration. Due to the frequency of aborts, for each retry, a new transaction object had to be created, meaning more memory allocated for the transaction object, its read/write operation objects and its completable values, hence more pressure on the GC (Java's GC), more GC pauses, lower thrpt and higher variance.
 
 
 ## Conclusions
-The `QueueVersionChain` paired with `Long2ArrayEpochTracker` ended up being the best all round configuration, reads comfortably in the multi-million ops/s range across thread counts, writes improved significantly from the initial ~2k. A few things are still unresolved though, the 2-thread throughput anomaly with map-based epoch tracking being the main one, and the retry memory pressure under high abort rates is worth revisiting. I'd likely make transaction objects reusable to reduce GC pressure on retries. 
+The `QueueVersionChain` paired with `Long2ArrayEpochTracker` ended up being the best all round configuration, reads comfortably in the multi-million ops/s range across thread counts, writes improved significantly from the initial ~2k. A few things are still unresolved though, the 2-thread throughput anomaly with map-based epoch tracking being the main one, and the retry memory pressure under high abort rates is worth revisiting. I'd likely make transaction objects reusable to reduce GC pressure on retries.
+
 However, if you want to check out the mvcc implementation, benchmark code, or my mvcc map benchmarks under more realistic workloads i.e. Zipfian benchmarks. You can visit the **GitHub** repository: https://github.com/kusoroadeolu/tx-map/tree/mvcc-txmap
