@@ -377,4 +377,5 @@ To fully understand this drop on the write heavy bench I compared profile data f
 
 
 ## Conclusions
-At this point reads are sitting comfortably in the multi-million ops/s range and writes have come a long way from the initial ~2k. There's still some open questions, the 2-thread throughput anomaly with default map-based epoch tracking being the main one and the retry memory pressure under high abort rates is worth revisiting. But for now, pretty happy with where things landed.
+The `QueueVersionChain` paired with `Long2ArrayEpochTracker` ended up being the best all round configuration, reads comfortably in the multi-million ops/s range across thread counts, writes improved significantly from the initial ~2k. A few things are still unresolved though, the 2-thread throughput anomaly with map-based epoch tracking being the main one, and the retry memory pressure under high abort rates is worth revisiting. I'd likely make transaction objects reusable to reduce GC pressure on retries. 
+However, if you want to check out the mvcc implementation, benchmark code, or my mvcc map benchmarks under more realistic workloads i.e. Zipfian benchmarks. You can visit the **GitHub** repository: https://github.com/kusoroadeolu/tx-map/tree/mvcc-txmap
