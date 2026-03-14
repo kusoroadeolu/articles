@@ -1,5 +1,6 @@
 # Introduction
 This post walks through the performance journey of an MVCC transactional map I've been building in Java, from a few thousand ops/s to a few million. It's mostly numbers and profiling observations, so if that's not your thing, fair warning.
+You can visit the [GitHub repository](https://github.com/kusoroadeolu/tx-map/tree/mvcc-txmap) if you want to follow along
 
 ## Benchmark Setup
 - JMH version: 1.37
@@ -8,8 +9,8 @@ This post walks through the performance journey of an MVCC transactional map I'v
 - Warmup: 10 iterations × 1s each
 - Measurement: 5 iterations × 1s each
 - Forks: 2
-- Thread configurati- on: 1, 2 , 4, 8 (Platform threads)
-  CPU Specs: Intel(R) Core(TM) i5-10300H CPU @ 2.50GHz (2.50 GHz), 8 cores
+- Thread configuration: 1, 2 , 4, 8 (Platform threads)
+- CPU Specs: Intel(R) Core(TM) i5-10300H CPU @ 2.50GHz (2.50 GHz), 8 cores
 
 ## The Journey
 Initially my MVCC txMap had good read numbers for thrpt and decent write numbers, though the error margins for the write numbers were bad, so I decided to investigate. While investigating, I encountered an issue. Also, just a quick note before we continue that `ActiveTransactions` just keeps tab on all active transactions at the moment.
@@ -17,7 +18,7 @@ Initially my MVCC txMap had good read numbers for thrpt and decent write numbers
 
 ```java
 //A map keeping track of all active transactions
-ActiveTransactions activeTxns = mvccMap.activeTransactions.copy(); //Copied the entire map on active txns, could be thousands 
+ActiveTransactions activeTxns = mvccMap.activeTransactions.copy(); //Copied the entire map on active txns, could be hundred of thousands 
 long minVisibleEpoch = activeTxns.findMinVisibleEpoch(); 
 versionChain.removeUnreachableVersions(minVisibleEpoch);
 
@@ -337,7 +338,7 @@ I was still a bit skeptical about the variance, even though it was pretty reason
 The thrpt was great, though after some research I found out about a generic trick, using primitive arrays as generic types, so instead of boxed long values. I decided to try this out with CHM and compare it to the serialized long2long version
 ```java
 ConcurrentMap<Long, Long> map //Instead of this, we could do
-ConcurrentMap<Long, long[]> map //No boxing for values
+ConcurrentMap<Long, long[]> map //No boxing
 ```
 
 | Benchmark | Version Chain | Mode | Cnt | Score | Error | Units |
@@ -360,7 +361,7 @@ ConcurrentMap<Long, long[]> map //No boxing for values
 | writeHeavy_8threads | nav | thrpt | 10 | 4,574,077.728 | ± 549,287.881 | ops/s |
 
 
-Since, I've been testing thrpt for my mvcc map for "best case scenarios" i.e. no retries on aborts. I decided to test with retries on abort. Note that this is base-lined against my map with a `Long2ArrayEpochTracker`
+Since, I've been testing thrpt for my MVCC map for "best case scenarios" i.e. no retries on aborts. I decided to test with retries on abort. Note that this is base-lined against my map with a `Long2ArrayEpochTracker`
 
 | Benchmark | Version Chain | Mode | Cnt | Score | Error | Units |
 |---|---|---|---|---|---|---|
@@ -385,6 +386,6 @@ To fully understand this drop on the write heavy bench I compared profile data f
 
 
 ## Conclusions
-The `QueueVersionChain` paired with `Long2ArrayEpochTracker` ended up being the best all round configuration, reads comfortably in the multi-million ops/s range across thread counts, writes improved significantly from the initial ~2k. A few things are still unresolved though, the 2-thread throughput anomaly with map-based epoch tracking being the main one, and the retry memory pressure under high abort rates is worth revisiting. I'd likely make transaction objects reusable to reduce GC pressure on retries.
+The `QueueVersionChain` paired with `Long2ArrayEpochTracker` ended up being the best all round combination, reads are comfortably in the million ops/s range across thread counts, writes improved significantly from the initial ~2k. A few things are still unresolved though, the 2-thread throughput anomaly with the `DefaultEpochTracker` being the main one, and the retry memory pressure under high abort rates is worth revisiting. I'd likely make transaction objects reusable to reduce GC pressure on retries. For now though, I am happy with where things landed
+However, if you want to check out the MVCC implementation, benchmark code, or my MVCC map benchmarks under more realistic workloads i.e. Zipfian benchmarks. You can visit the **GitHub** repository: https://github.com/kusoroadeolu/tx-map/tree/mvcc-txmap
 
-However, if you want to check out the mvcc implementation, benchmark code, or my mvcc map benchmarks under more realistic workloads i.e. Zipfian benchmarks. You can visit the **GitHub** repository: https://github.com/kusoroadeolu/tx-map/tree/mvcc-txmap
