@@ -1,8 +1,18 @@
 # Introduction
 This post walks through the performance journey of an MVCC transactional map I've been building in Java, from a few thousand ops/s to a few million. It's mostly numbers and profiling observations, so if that's not your thing, fair warning.
 
+## Benchmark Setup
+- JMH version: 1.37
+- JVM: Java 25, HotSpot 64-Bit Server VM (25+37-LTS-3491)
+- Benchmark mode: Throughput (ops/s)
+- Warmup: 10 iterations × 1s each
+- Measurement: 5 iterations × 1s each
+- Forks: 2
+- Thread configurati- on: 1, 2 , 4, 8 (Platform threads)
+  CPU Specs: Intel(R) Core(TM) i5-10300H CPU @ 2.50GHz (2.50 GHz), 8 cores
+
 ## The Journey
-Initially my MVCC txMap had good read numbers for thrpt and decent write numbers, though the error margins for the write numbers were bad, so I decided to investigate. While investigating, I encountered an issue. Also, just a quick note before we continue that `ActiveTransactions` isn't my garbage collector, rather it just keeps tab on all active transactions at the moment.
+Initially my MVCC txMap had good read numbers for thrpt and decent write numbers, though the error margins for the write numbers were bad, so I decided to investigate. While investigating, I encountered an issue. Also, just a quick note before we continue that `ActiveTransactions` just keeps tab on all active transactions at the moment.
 
 
 ```java
