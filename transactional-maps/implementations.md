@@ -212,6 +212,7 @@ Then for each operation:
 ### Isolation Level
 - **READ COMMITTED**
 - Repeatable reads aren't guaranteed
+- Still skeptical about the isolation level here though, might be wrong, this could also be **SNAPSHOT** since we get a snapshot(time-stop to call it) copy of the whole map at commit
 
 ### How It Works
 
@@ -414,7 +415,7 @@ for (i = 0; i < capacity; i++) {
 }
 ```
 
-**Unique Property:** Fixed memory, no pointer chasing, but potential false sharing.
+**Unique Property:** Bounded capacity, no pointer chasing, but potential false sharing.
 
 ---
 
@@ -483,7 +484,7 @@ This is based on the approach described in [the VLDB paper](https://www.vldb.org
 - `ConcurrentMap<K, KeyStatus>` — per-key write lock (CAS-based, not a real lock)
 - `EpochTracker` — global epoch counter, tracks active transaction begin epochs for GC
 - `GCThread` — background thread that prunes unreachable versions
-- `AtomicInteger(size)` — dirty global size counter
+- `AtomicInteger(size)` — approximate global size counter
 
 ### Transaction Lifecycle
 
@@ -494,11 +495,11 @@ tBegin = epochTracker.currentEpoch(); // Snapshot epoch
 The transaction records the current global epoch as its `tBegin`. This is the epoch from which it reads any version visible at `tBegin` is part of its snapshot. The epoch tracker also registers this `tBegin` so the GC knows the oldest epoch still in use.
 
 **For writes (PUT/REMOVE):**
-- Attempt to acquire the `KeyStatus` write lock for that key via CAS
+- Attempt to acquire the `KeyStatus` write lock for that key via a CAS
 - If the key is already locked by another transaction, **we abort immediately**
 - Check that `tBegin` still overlaps the latest version on the chain (late-arriving transaction check):
 ```java
-if (!(tBegin >= latest.beginTs() && tBegin < latest.endTs())) abort();
+if (!(tBegin >= latest.beginTs() && tBegin < latest.endTs())) abort(); 
 ```
 - If both checks pass, we record the write operation
 
@@ -520,7 +521,7 @@ if (seen != overlapAtCommit) abort(); // Someone wrote to this key between tBegi
 //key = "A", versions = [(0,101,"old"), (102,INF,"new")] //INF = INFINITY
 // tBegin should see version "old", while tCommit should see version "new"
 ```
-This catches read-write conflicts, if any key you read was written by a concurrent transaction between your begin and commit, you abort.
+This catches read-write conflicts, if any key you read was written by a concurrent transaction between your begin and commit, the transaction is aborted.
 
 #### 4. Commit Phase
 - For each write operation: append a new version to the version chain with `beginTs = tCommit`
@@ -579,7 +580,6 @@ Three implementations exist:
 ---
 
 ### GC Thread
-
 Version chains grow unboundedly without cleanup. The GC thread handles pruning old versions that no transaction can ever see again.
 
 **Design:**
@@ -587,7 +587,7 @@ Version chains grow unboundedly without cleanup. The GC thread handles pruning o
 - A `ScheduledExecutorService` (virtual thread) refreshes a cached `minVisibleEpoch` from an `EpochTracker` every 100ms
 - Writer transactions submit a cleanup request when `versionChain.size() % threshold == 0`
 
-**Why cached epoch reads:**
+**Why I cached epoch reads:**
 Reading `minVisibleEpoch()` on every write transaction commit was a hotspot. It involves scanning the epoch tracker under contention. Decoupling this into a scheduled read trades  precision for significantly lower write path overhead. Versions may survive slightly longer than necessary though.
 
 **Pruning logic:**
