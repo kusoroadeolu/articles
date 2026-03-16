@@ -1,11 +1,11 @@
-# Transactional Map Implementations 
+# A Practical Exploration of Transactional Map Implementations in Java
 - Date Written: Monday, March 16, 2026.
 
-This writeup contains all my transactional map implementations so far. Basically just an explanation of all the transactional maps I've built in the last 3-4 weeks. No benchmarks/numbers here
 
+This writeup documents the transactional maps I’ve implemented over the last few weeks. It mainly focuses on design, lifecycle, and implementation details. No benchmarks or perf numbers included
 
 ## 1. Optimistic Transactional Map
-This is based on the approach described in [the transactional collections classes paper](https://people.csail.mit.edu/mcarbin/papers/ppopp07.pdf).
+This is mainly inspired by the approach described in [the transactional collections classes paper](https://people.csail.mit.edu/mcarbin/papers/ppopp07.pdf).
 
 
 ### Isolation Level
@@ -71,7 +71,7 @@ tx.put(key, val)  // Does NOT acquire any lock yet
 ---
 
 ## 2. Pessimistic Transactional Map
-This is based on the approach described in [the transactional collections classes paper](https://people.csail.mit.edu/mcarbin/papers/ppopp07.pdf).
+This is mainly inspired by the approach described in [the transactional collections classes paper](https://people.csail.mit.edu/mcarbin/papers/ppopp07.pdf).
 
 
 ### Isolation Level
@@ -122,7 +122,7 @@ tx.put(key, val)  // Does NOT acquire lock, just records
 - Check the latch for the operation type on that key
 - If latch is HELD by another transaction:
     - **Waits** on the `CountDownLatch` (blocks until writer releases)
-    - When awakened, recheck if the latch has been reacquired else increment `readerCount` 
+    - When awakened, recheck if the latch has been reacquired else increment `readerCount`
 - If latch is FREE:
     - Just increment `readerCount`
 
@@ -210,7 +210,7 @@ Then for each operation:
 ## 4. Copy-on-Write Transactional Map
 
 ### Isolation Level
-- **READ COMMITTED** 
+- **READ COMMITTED**
 - Repeatable reads aren't guaranteed
 
 ### How It Works
@@ -462,7 +462,7 @@ sizeCombiner.combine(_ -> { /* apply size ops */ });
 - Better parallelism -> different keys can be combined concurrently
 - More overhead -> one combiner per key
 - Writes per key still serialized, but across different keys they're parallel
-Surprisingly, from the benchmarks, a single combiner scales better than a segmented combiner, mainly due to the fact that combiners benefit the fact that batching operations and spinning, amortizes the cost of lock contention, unlike a segmented combiner where batching is less common due to each operation of a transaction mainly working on different keys. However this is just a speculation
+  Surprisingly, from the benchmarks, a single combiner scales better than a segmented combiner, mainly due to the fact that combiners benefit the fact that batching operations and spinning, amortizes the cost of lock contention, unlike a segmented combiner where batching is less common due to each operation of a transaction mainly working on different keys. However this is just a speculation
 ---
 
 ## 6. MVCC Transactional Map
@@ -493,11 +493,9 @@ tBegin = epochTracker.currentEpoch(); // Snapshot epoch
 ```
 The transaction records the current global epoch as its `tBegin`. This is the epoch from which it reads any version visible at `tBegin` is part of its snapshot. The epoch tracker also registers this `tBegin` so the GC knows the oldest epoch still in use.
 
-#### 2. Schedule Phase (when operations are called)
-
 **For writes (PUT/REMOVE):**
 - Attempt to acquire the `KeyStatus` write lock for that key via CAS
-- If the key is already locked by another transaction — **abort immediately**, no spinning
+- If the key is already locked by another transaction, **we abort immediately**
 - Check that `tBegin` still overlaps the latest version on the chain (late-arriving transaction check):
 ```java
 if (!(tBegin >= latest.beginTs() && tBegin < latest.endTs())) abort();
@@ -528,14 +526,14 @@ This catches read-write conflicts, if any key you read was written by a concurre
 - For each write operation: append a new version to the version chain with `beginTs = tCommit`
 - Set the previous latest version's `endTs = tCommit` (closing its visibility window)
 - Release all `KeyStatus` write locks
-- Call `epochTracker.leaveEpoch(tBegin)` so GC knows this epoch might no longer be visible 
+- Call `epochTracker.leaveEpoch(tBegin)` so GC knows this epoch might no longer be visible
 - If the version chain depth crosses the configured threshold, submit a cleanup request to the GC thread
 
 ---
 
 ### Version Chains
 
-Each key's history is stored in a `VersionChain<V>`. Two implementations exist, selectable at construction time.
+Each key's history is stored in a `VersionChain<V>`. Two independent implementations exist.
 
 #### QueueVersionChain
 - Backed by a `ConcurrentLinkedDeque`
@@ -605,10 +603,10 @@ The latest version is always preserved regardless of its timestamps, since new t
 - **Readers never acquire locks** -> unlike the optimistic and pessimistic implementations where readers hold read locks or increment atomic counters, MVCC readers are completely non-blocking. A read is just a version chain traversal with no shared mutable state touched
 - Write-write conflicts are detected at commit time
 - **Abort-on-conflict instead of wait-on-conflict** -> when a write lock is already held, the transaction aborts immediately rather than parking. This keeps latency bounded but means abort rates climb sharply under high write contention, unlike other transactional map implementations(except Copy On Write) which forces writers to wait
-- The queue chain favors writes (O(1) append, cheap traversal for short chains) while the navigable chain favors reads (O(log N) lookup) at the cost of more expensive skip list insertions. 
+- The queue chain favors writes (O(1) append, cheap traversal for short chains) while the navigable chain favors reads (O(log N) lookup) at the cost of more expensive skip list insertions.
 - The shared epoch `DefaultEpochTracker` works correctly with any thread model but contends on `computeIfAbsent()` calls, which could kill perf if frequent. The thread keyed trackers (`LongToArray`, `Long2Long`) eliminate that contention entirely since each key is owned by exactly one thread
 
-## Summary
+## Summary Table
 
 | Implementation              | Isolation Level                       | When Locks Acquired        | Readers Block Writers? | Writers Block Readers? | Probably Best For                                |
 |-----------------------------|---------------------------------------|----------------------------|---|---|--------------------------------------------------|
@@ -619,3 +617,13 @@ The latest version is always preserved regardless of its timestamps, since new t
 | **Flat Combined**           | SERIALIZABLE                          | N/A (combiners)            | N/A | N/A | High contention, batch benefits                  |
 | **Segmented Flat Combined** | SERIALIZABLE                          | N/A (per-key combiners)    | N/A | N/A | Outperformed by a single flat combined map       |
 | **MVCC**                    | SNAPSHOT                              | Reads: eager Writes: eager | N/A | N/A | Best for read heavy scenarios                    |
+
+## Links/References
+1. **MVCC Paper:**  https://www.vldb.org/pvldb/vol10/p781-Wu.pdf
+2. **Flat Combining Paper:** https://people.csail.mit.edu/shanir/publications/Flat%20Combining%20SPAA%2010.pdf
+3. **Transactional Collections Paper:** https://people.csail.mit.edu/mcarbin/papers/ppopp07.pdf
+4. **GitHub:**
+- Optimistic Tx-Map: https://github.com/kusoroadeolu/tx-map
+- Pessimistic/Copy-On-Write/Read Uncommitted Tx-Map: https://github.com/kusoroadeolu/tx-map/tree/pessimistic-txmap
+- Flat Combining Tx-Map: https://github.com/kusoroadeolu/tx-map/tree/fc-txmap
+- MVCC Tx-Map: https://github.com/kusoroadeolu/tx-map/tree/mvcc-txmap
