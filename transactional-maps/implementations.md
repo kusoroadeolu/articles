@@ -1,7 +1,7 @@
 # Transactional Map Implementations 
-- Date Written: Monday, February 16, 2026.
+- Date Written: Monday, March 16, 2026.
 
-This writeup contains all my transactional map implementations so far. Basically just a mini writeup of what I've built in the last 3-4 weeks. No benchmarks/numbers here
+This writeup contains all my transactional map implementations so far. Basically just an explanation of all the transactional maps I've built in the last 3-4 weeks. No benchmarks/numbers here
 
 
 ## 1. Optimistic Transactional Map
@@ -15,8 +15,8 @@ This is based on the approach described in [the transactional collections classe
 
 ### Implementation
 **Core Data Structures:**
-- `ConcurrentMap<K, V>` — The underlying map
-- `KeyToLockers<K>` — Maps each key to operation-specific `GuardedTxSet`s
+- `ConcurrentMap<K, V>` -> The underlying map
+- `KeyToLockers<K>` -> Maps each key to operation-specific `GuardedTxSet`s
 - Each `GuardedTxSet` contains:
     - A `ReentrantReadWriteLock` (split into read/write locks)
     - A set of transactions waiting on that operation
@@ -45,7 +45,7 @@ tx.put(key, val)  // Does NOT acquire any lock yet
 - Already validated (holding read lock since schedule time)
 
 **For writes:**
-- Sort all write keys by `identityHashCode()` (prevents deadlock via global ordering)
+- Sort all write keys by `identityHashCode()` (prevents deadlock via normal ordering)
 - For each key being written:
     1. Acquire the **write lock** for that key
     2. For each conflicting read operation type (GET, CONTAINS):
@@ -65,8 +65,8 @@ tx.put(key, val)  // Does NOT acquire any lock yet
 
 ### Unique Properties
 - **Readers block writers, writers block readers, but readers never block readers**
-- The lock upgrade implementation (release read → acquire write) prevents self-deadlock
-- Semantic awareness: doesn't acquire **SIZE** lock when not semantically necessary. Acquire **CONTAINS** lock, only holds on to it if in the case of **REMOVE**(the value already existed), and, in the case of **PUT** the values did not exist already 
+- The lock upgrade implementation (release read -> acquire write) prevents self-deadlock
+- Semantic awareness: doesn't acquire **SIZE** lock when not semantically necessary. Acquire **CONTAINS** lock, only holds on to it if in the case of **REMOVE**(the value exists), and, in the case of **PUT** (the values does not exist)
 
 ---
 
@@ -81,8 +81,8 @@ This is based on the approach described in [the transactional collections classe
 ### Implementation
 
 **Core Data Structures:**
-- `ConcurrentMap<K, V>` — The underlying map
-- `KeyToLockers<K>` — Maps each key to operation-specific `GuardedTxSet`s
+- `ConcurrentMap<K, V>` -> The underlying map
+- `KeyToLockers<K>` -> Maps each key to operation-specific `GuardedTxSet`s
 - Each `GuardedTxSet` contains:
     - A `ReentrantLock` (write lock)
     - An `AtomicInteger` reader count
@@ -122,7 +122,7 @@ tx.put(key, val)  // Does NOT acquire lock, just records
 - Check the latch for the operation type on that key
 - If latch is HELD by another transaction:
     - **Waits** on the `CountDownLatch` (blocks until writer releases)
-    - When awakened, recheck if the latch has been reacquired else increment `readerCount`
+    - When awakened, recheck if the latch has been reacquired else increment `readerCount` 
 - If latch is FREE:
     - Just increment `readerCount`
 
@@ -131,10 +131,10 @@ tx.put(key, val)  // Does NOT acquire lock, just records
 - For writers: set latch to FREE, countdown the latch (wake waiting readers)
 - Release all locks
 - For readers: decrement `readerCount`
-- Remove from `GuardedTxSet`s
+- Remove from `GuardedTxSet`
 
 ### Unique Properties
-- **Readers use atomic counters, not locks** — cheaper than lock acquisition
+- Readers use atomic counters, not locks cheaper than lock acquisition
 - Writers must **drain readers** before proceeding (spin on `readerCount`)
 - The latch mechanism prevents TOCTOU bugs: check status and await in single atomic read
 - More OS context switches due to readers parking/unparking on `CountDownLatch`
@@ -144,14 +144,14 @@ tx.put(key, val)  // Does NOT acquire lock, just records
 ## 3. Read Uncommitted Transactional Map
 
 ### Isolation Level
-- **READ UNCOMMITTED** — dirty reads allowed (can see uncommitted writes)
+- **READ UNCOMMITTED** -> dirty reads allowed (can see uncommitted writes)
 
 ### Implementation
 
 **Core Data Structures:**
-- `ConcurrentMap<K, V>` — The underlying map
-- `LockHolder<K, V>` — Per-key `ReentrantLock`s for writes
-- Per-transaction **store buffer** (`Map<K, V>`) — local cache of reads, probably might not need this looking back at this
+- `ConcurrentMap<K, V>` -> The underlying map
+- `LockHolder<K, V>` -> Per-key `ReentrantLock`s for writes
+- Per-transaction **store buffer** (`Map<K, V>`) -> local cache of writes
 
 ### Transaction Lifecycle
 
@@ -166,7 +166,7 @@ tx.put(key, val)  // Does NOT acquire lock, just records
 - Acquire per-key locks in sorted order
 
 **For reads:**
-- No validation needed
+- No validation is needed
 
 #### 3. Commit Phase
 
@@ -201,8 +201,8 @@ Then for each operation:
 - Return `snapshotSize + delta`
 
 ### Unique Properties
-- **No reader blocking at all** — highest read throughput
-- **Dirty reads** mean you might see uncommitted data
+- **No reader blocking at all**
+- **Dirty reads** meaning you might see uncommitted data
 - Store buffer provides **read-your-own-writes** consistency within a transaction
 
 ---
@@ -210,13 +210,13 @@ Then for each operation:
 ## 4. Copy-on-Write Transactional Map
 
 ### Isolation Level
-- **READ COMMITTED** globally (but dirty reads possible between snapshot and commit)
-- Repeatable reads not guaranteed
+- **READ COMMITTED** 
+- Repeatable reads aren't guaranteed
 
 ### How It Works
 
 **Core Data Structures:**
-- `AtomicReference<ConcurrentMap<K, V>>` — Pointer to current map snapshot
+- `AtomicReference<ConcurrentMap<K, V>>` -> Ref to current map snapshot
 
 ### Transaction Lifecycle
 
@@ -227,7 +227,7 @@ Then for each operation:
 #### 2. Validation Phase
 
 **Retry loop:**
-
+A quite simple retry loop
 ```java
 do {
     prev = txMap.map.get();                      // Get current snapshot
@@ -250,7 +250,7 @@ do {
 - Just complete futures with stored results
 
 ### Unique Properties
-- **Entire map copied on every write transaction** — doesn't scale with map size
+- **Entire map copied on every write transaction** -> doesn't scale with map size
 - Under high contention: lots of CAS retries -> lots of copies -> terrible write heavy performance
 - **Best read performance** when map is mostly read (no blocking, no locking)
 - Simple implementation but hard on memory and GC under high write contention
@@ -284,9 +284,9 @@ This is based on the approach described in [this paper](https://people.csail.mit
 
 **Data Structures:**
 - Thread-local `Node<E, R>` for each thread
-- Shared publication list (linked via `AtomicReference<Node>` head)
+- Shared publication list (accessible via an atomic ref `Node` head)
 - Per-node `StatefulAction` with:
-    - `volatile Action<E, R> action`
+    - `Action<E, R> action` -> This is a volatile barrier
     - `R result`
     - `AtomicInteger status` (ACTIVE/INACTIVE)
 - Dummy sentinel node marks end of queue
@@ -373,11 +373,11 @@ for (node = curNode; i < threshold && node.next != null; node = node.next) {
 
 ---
 
-##### AtomicArrayCombiner (Bounded combiner)
+##### AtomicArrayCombiner (A bounded combiner)
 
 **Data Structures:**
 - `AtomicReferenceArray<Node>` of size `capacity`
-- `AtomicLong cellNum` — monotonically increasing cell assignment
+- `AtomicLong cellNum` -> monotonically increasing cell assignment
 - Per-thread `ThreadLocal<Node>`
 
 **Implementation:**
@@ -438,10 +438,10 @@ Plain lock which is used as baseline to measure if flat combining actually helps
 **Key Difference:** Instead of one combiner for the entire map, **one combiner per key + one for SIZE**.
 
 **Data Structures:**
-- `ConcurrentMap<K, Combiner<Map<K, V>>>` — Maps each key to its own combiner
+- `ConcurrentMap<K, Combiner<Map<K, V>>>` -> Maps each key to its own combiner
 - Separate `sizeCombiner` for SIZE operations
 
-**How It Works:**
+**Implementation:**
 
 ```java
 // Group operations by key
@@ -458,22 +458,22 @@ for (key, operations) in keyToFuture:
 sizeCombiner.combine(_ -> { /* apply size ops */ });
 ```
 
-**Unique Property:**
-- Better parallelism — different keys can be combined concurrently
-- More overhead — one combiner per key
+**Unique Properties:**
+- Better parallelism -> different keys can be combined concurrently
+- More overhead -> one combiner per key
 - Writes per key still serialized, but across different keys they're parallel
-Oddly, from the benchmarks, a single combiner scales better than a segmented combiner, mainly due to the fact that combiners benefit the fact that batching operations and spinning, amortizes the cost of lock contention, unlike a segmented combiner where batching is less common due to each operation of a transaction mainly working on different keys
+Surprisingly, from the benchmarks, a single combiner scales better than a segmented combiner, mainly due to the fact that combiners benefit the fact that batching operations and spinning, amortizes the cost of lock contention, unlike a segmented combiner where batching is less common due to each operation of a transaction mainly working on different keys. However this is just a speculation
 ---
 
 ## 6. MVCC Transactional Map
 
 ### Isolation Level
-- **Snapshot Isolation** — each transaction reads from a consistent snapshot taken at begin time
+- **Snapshot Isolation** -> each transaction reads from a consistent snapshot taken at begin time
 - No dirty reads, no non-repeatable reads
 - SIZE reads are dirty (no version chain maintained for size)
 
 ### Core Idea
-Rather than blocking readers with locks, each key maintains a **version chain** — an ordered list of all historical values written to that key. Each version has a `beginTs` and `endTs` defining the epoch range in which it is visible. Readers find the version that overlaps their snapshot epoch without acquiring any locks. Writers append new versions and conflict only with other concurrent writers on the same key.
+Rather than blocking readers with locks, each key maintains a **version chain**, an ordered list of all historical values written to that key. Each version has a `beginTs` and `endTs` defining the epoch range in which it is visible. Readers find the version that overlaps their snapshot epoch without acquiring any locks. Writers append new versions and conflict only with other concurrent writers on the same key.
 
 This is based on the approach described in [the VLDB paper](https://www.vldb.org/pvldb/vol10/p781-Wu.pdf).
 
@@ -491,7 +491,7 @@ This is based on the approach described in [the VLDB paper](https://www.vldb.org
 ```java
 tBegin = epochTracker.currentEpoch(); // Snapshot epoch
 ```
-The transaction records the current global epoch as its `tBegin`. This is the epoch from which it reads — any version visible at `tBegin` is part of its snapshot. The epoch tracker also registers this `tBegin` so the GC knows the oldest epoch still in use.
+The transaction records the current global epoch as its `tBegin`. This is the epoch from which it reads any version visible at `tBegin` is part of its snapshot. The epoch tracker also registers this `tBegin` so the GC knows the oldest epoch still in use.
 
 #### 2. Schedule Phase (when operations are called)
 
@@ -517,6 +517,10 @@ At commit time, a `tCommit` epoch is assigned via `epochTracker.newEpoch()`.Sequ
 ```java
 Version overlapAtCommit = versionChain(key).findOverlap(tCommit);
 if (seen != overlapAtCommit) abort(); // Someone wrote to this key between tBegin and tCommit
+//A quick example
+//tBegin = 100, tCommit = 105
+//key = "A", versions = [(0,101,"old"), (102,INF,"new")] //INF = INFINITY
+// tBegin should see version "old", while tCommit should see version "new"
 ```
 This catches read-write conflicts, if any key you read was written by a concurrent transaction between your begin and commit, you abort.
 
@@ -535,7 +539,7 @@ Each key's history is stored in a `VersionChain<V>`. Two implementations exist, 
 
 #### QueueVersionChain
 - Backed by a `ConcurrentLinkedDeque`
-- `findOverlap()` does a **descending linear scan**
+- `findOverlap()` does a **descending linear scan**, meaning we start from the tail of the deque, to find newer versions easier and cut traversal time
 - Size tracked with an `AtomicLong` to avoid O(N) `size()` calls on the deque
 - Better write performance, lower overhead per version
 
@@ -564,13 +568,13 @@ Three implementations exist:
 
 #### Long2LongEpochTracker
 - Synchronized `Long2LongOpenHashMap` (using fast-util's Long2LongHashMap) maps thread ID -> current epoch
-- No boxing on values — avoids allocation pressure on the hot path
+- No boxing on values which avoids allocation pressure on the hot path
 - `leaveEpoch()` writes a sentinel value (`-1`) rather than removing the entry
 - `minVisibleEpoch()` scans values, skipping sentinels
 - This is best paired with pooled platform threads
 
 #### LongToArrayEpochTracker *(default)*
-- `ConcurrentHashMap<Long, long[]>` mapping thread ID → single-element `long[]`
+- `ConcurrentHashMap<Long, long[]>` mapping thread ID to a single-element `long[]`
 - Same thread-local design as `Long2LongEpochTracker` but avoids boxing via the `long[]` trick without fast-utils's hashmap
 - This is best paired with pooled platform threads
 
@@ -582,11 +586,11 @@ Version chains grow unboundedly without cleanup. The GC thread handles pruning o
 
 **Design:**
 - A single platform daemon thread continuously drains a bounded queue(`LinkedBlockingQueue`) of cleanup requests
-- A `ScheduledExecutorService` (virtual thread) refreshes the cached `minVisibleEpoch` every 100ms
+- A `ScheduledExecutorService` (virtual thread) refreshes a cached `minVisibleEpoch` from an `EpochTracker` every 100ms
 - Writer transactions submit a cleanup request when `versionChain.size() % threshold == 0`
 
 **Why cached epoch reads:**
-Reading `minVisibleEpoch()` on every write transaction commit was a hotspot. It involves scanning the epoch tracker under contention. Decoupling this into a scheduled read trades perfect GC precision for significantly lower write path overhead. Versions may survive slightly longer than necessary, but correctness is unaffected since `findOverlap()` still skips them.
+Reading `minVisibleEpoch()` on every write transaction commit was a hotspot. It involves scanning the epoch tracker under contention. Decoupling this into a scheduled read trades  precision for significantly lower write path overhead. Versions may survive slightly longer than necessary though.
 
 **Pruning logic:**
 ```java
@@ -598,9 +602,9 @@ The latest version is always preserved regardless of its timestamps, since new t
 ---
 
 ### Unique Properties
-- **Readers never acquire locks** — unlike the optimistic and pessimistic implementations where readers hold read locks or increment atomic counters, MVCC readers are completely non-blocking. A read is just a version chain traversal with no shared mutable state touched
+- **Readers never acquire locks** -> unlike the optimistic and pessimistic implementations where readers hold read locks or increment atomic counters, MVCC readers are completely non-blocking. A read is just a version chain traversal with no shared mutable state touched
 - Write-write conflicts are detected at commit time
-- **Abort-on-conflict instead of wait-on-conflict** — when a write lock is already held, the transaction aborts immediately rather than parking. This keeps latency bounded but means abort rates climb sharply under high write contention, unlike other tx map implementations(except Copy-on-Write) which forces writers to wait
+- **Abort-on-conflict instead of wait-on-conflict** -> when a write lock is already held, the transaction aborts immediately rather than parking. This keeps latency bounded but means abort rates climb sharply under high write contention, unlike other transactional map implementations(except Copy On Write) which forces writers to wait
 - The queue chain favors writes (O(1) append, cheap traversal for short chains) while the navigable chain favors reads (O(log N) lookup) at the cost of more expensive skip list insertions. 
 - The shared epoch `DefaultEpochTracker` works correctly with any thread model but contends on `computeIfAbsent()` calls, which could kill perf if frequent. The thread keyed trackers (`LongToArray`, `Long2Long`) eliminate that contention entirely since each key is owned by exactly one thread
 
