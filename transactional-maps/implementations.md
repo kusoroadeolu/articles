@@ -1,8 +1,12 @@
 # Transactional Map Implementations 
-This writeup contains all my transactional map implementations so far. All my transactional maps are fully lazy until `commit()` is called.
+- Date Written: Monday, February 16, 2026.
+
+This writeup contains all my transactional map implementations so far. Basically just a mini writeup of what I've built in the last 3-4 weeks. No benchmarks/numbers here
 
 
 ## 1. Optimistic Transactional Map
+This is based on the approach described in [the transactional collections classes paper](https://people.csail.mit.edu/mcarbin/papers/ppopp07.pdf).
+
 
 ### Isolation Level
 - **READ COMMITTED** globally
@@ -49,17 +53,17 @@ tx.put(key, val)  // Does NOT acquire any lock yet
         - If yes, **release the read lock first** (prevent upgrade deadlock)
         - Acquire the **write lock** for that operation type
     3. Check if SIZE lock is needed:
-        - `PUT` on new key → acquire SIZE write lock (size will increase)
-        - `PUT` on existing key → release CONTAINS write lock if held (size unchanged, CONTAINS always true)
-        - `REMOVE` on existing key → acquire SIZE write lock (size will decrease)
-        - `REMOVE` on non-existent key → release CONTAINS write lock if held (size unchanged, CONTAINS always false)
+        - `PUT` on new key -> acquire SIZE write lock (size will increase)
+        - `PUT` on existing key -> release CONTAINS write lock if held (size unchanged, CONTAINS always true)
+        - `REMOVE` on existing key -> acquire SIZE write lock (size will decrease)
+        - `REMOVE` on non-existent key -> release CONTAINS write lock if held (size unchanged, CONTAINS always false)
 
 #### 3. Commit Phase
 - Apply all operations to the underlying map
 - Release all held locks (both read and write)
 - Remove transactions from all `GuardedTxSet`
 
-### Key Insights
+### Unique Properties
 - **Readers block writers, writers block readers, but readers never block readers**
 - The lock upgrade implementation (release read → acquire write) prevents self-deadlock
 - Semantic awareness: doesn't acquire **SIZE** lock when not semantically necessary. Acquire **CONTAINS** lock, only holds on to it if in the case of **REMOVE**(the value already existed), and, in the case of **PUT** the values did not exist already 
@@ -67,6 +71,8 @@ tx.put(key, val)  // Does NOT acquire any lock yet
 ---
 
 ## 2. Pessimistic Transactional Map
+This is based on the approach described in [the transactional collections classes paper](https://people.csail.mit.edu/mcarbin/papers/ppopp07.pdf).
+
 
 ### Isolation Level
 - **READ COMMITTED** globally
@@ -127,7 +133,7 @@ tx.put(key, val)  // Does NOT acquire lock, just records
 - For readers: decrement `readerCount`
 - Remove from `GuardedTxSet`s
 
-### Key Insights
+### Unique Properties
 - **Readers use atomic counters, not locks** — cheaper than lock acquisition
 - Writers must **drain readers** before proceeding (spin on `readerCount`)
 - The latch mechanism prevents TOCTOU bugs: check status and await in single atomic read
@@ -198,7 +204,6 @@ Then for each operation:
 - **No reader blocking at all** — highest read throughput
 - **Dirty reads** mean you might see uncommitted data
 - Store buffer provides **read-your-own-writes** consistency within a transaction
-- Only ~18% throughput drop under write-heavy contention (best of all implementations)
 
 ---
 
@@ -233,7 +238,7 @@ do {
 ```
 
 **tryValidate():**
-- Apply operation to the local copy (`underlyingMap`)
+- Apply operation to the local copy of the underlyingMap
 - Store result in child transaction
 
 **If CAS fails:**
@@ -273,7 +278,9 @@ Uses one of four combiner types:
 
 ---
 
-##### UnboundCombiner (Faithful to paper)
+##### UnboundCombiner
+This is based on the approach described in [this paper](https://people.csail.mit.edu/shanir/publications/Flat%20Combining%20SPAA%2010.pdf).
+
 
 **Data Structures:**
 - Thread-local `Node<E, R>` for each thread
@@ -316,7 +323,7 @@ _scanCombineApply:_
 - Every `threshold` passes, scan and **dequeue aged nodes**:
     - If `(currentCount - node.age) >= threshold`: unlink, set INACTIVE
 
-**A Livelock Bug I Fixed:**
+**Keeping Track of a Livelock Bug I Fixed:**
 Threads could get stuck when the combiner removed their node before they noticed their action was applied. Fixed by forcing combiners to always re-enqueue and apply their own action rather than trusting others.
 
 ---
@@ -330,7 +337,7 @@ Threads could get stuck when the combiner removed their node before they noticed
 - Each node has `AtomicInteger status` (NOT_COMBINER/IS_COMBINER)
 - Shared `AtomicReference<Node>` tail
 
-**How It Works:**
+**Implementation:**
 
 ```java
 // Reset current node
@@ -422,7 +429,7 @@ try {
 }
 ```
 
-Plain lock — used as baseline to measure if flat combining actually helps.
+Plain lock which is used as baseline to measure if flat combining actually helps.
 
 ---
 
@@ -458,13 +465,153 @@ sizeCombiner.combine(_ -> { /* apply size ops */ });
 Oddly, from the benchmarks, a single combiner scales better than a segmented combiner, mainly due to the fact that combiners benefit the fact that batching operations and spinning, amortizes the cost of lock contention, unlike a segmented combiner where batching is less common due to each operation of a transaction mainly working on different keys
 ---
 
+## 6. MVCC Transactional Map
+
+### Isolation Level
+- **Snapshot Isolation** — each transaction reads from a consistent snapshot taken at begin time
+- No dirty reads, no non-repeatable reads
+- SIZE reads are dirty (no version chain maintained for size)
+
+### Core Idea
+Rather than blocking readers with locks, each key maintains a **version chain** — an ordered list of all historical values written to that key. Each version has a `beginTs` and `endTs` defining the epoch range in which it is visible. Readers find the version that overlaps their snapshot epoch without acquiring any locks. Writers append new versions and conflict only with other concurrent writers on the same key.
+
+This is based on the approach described in [the VLDB paper](https://www.vldb.org/pvldb/vol10/p781-Wu.pdf).
+
+### Core Data Structures
+
+- `ConcurrentMap<K, VersionChain<V>>` — maps each key to its version chain
+- `ConcurrentMap<K, KeyStatus>` — per-key write lock (CAS-based, not a real lock)
+- `EpochTracker` — global epoch counter, tracks active transaction begin epochs for GC
+- `GCThread` — background thread that prunes unreachable versions
+- `AtomicInteger(size)` — dirty global size counter
+
+### Transaction Lifecycle
+
+#### 1. Begin Phase
+```java
+tBegin = epochTracker.currentEpoch(); // Snapshot epoch
+```
+The transaction records the current global epoch as its `tBegin`. This is the epoch from which it reads — any version visible at `tBegin` is part of its snapshot. The epoch tracker also registers this `tBegin` so the GC knows the oldest epoch still in use.
+
+#### 2. Schedule Phase (when operations are called)
+
+**For writes (PUT/REMOVE):**
+- Attempt to acquire the `KeyStatus` write lock for that key via CAS
+- If the key is already locked by another transaction — **abort immediately**, no spinning
+- Check that `tBegin` still overlaps the latest version on the chain (late-arriving transaction check):
+```java
+if (!(tBegin >= latest.beginTs() && tBegin < latest.endTs())) abort();
+```
+- If both checks pass, we record the write operation
+
+**For reads (GET/CONTAINS):**
+- Check if the key's `KeyStatus` is held by another transaction, if so, abort
+- Snapshot the overlapping version at `tBegin` immediately:
+```java
+seen = versionChain(key).findOverlap(tBegin);
+```
+- Record the read operation and the version seen
+
+#### 3. Validation Phase
+At commit time, a `tCommit` epoch is assigned via `epochTracker.newEpoch()`.Sequentially, each read operation then re-checks whether the version it saw at `tBegin` is still the overlapping version at `tCommit`:
+```java
+Version overlapAtCommit = versionChain(key).findOverlap(tCommit);
+if (seen != overlapAtCommit) abort(); // Someone wrote to this key between tBegin and tCommit
+```
+This catches read-write conflicts, if any key you read was written by a concurrent transaction between your begin and commit, you abort.
+
+#### 4. Commit Phase
+- For each write operation: append a new version to the version chain with `beginTs = tCommit`
+- Set the previous latest version's `endTs = tCommit` (closing its visibility window)
+- Release all `KeyStatus` write locks
+- Call `epochTracker.leaveEpoch(tBegin)` so GC knows this epoch might no longer be visible 
+- If the version chain depth crosses the configured threshold, submit a cleanup request to the GC thread
+
+---
+
+### Version Chains
+
+Each key's history is stored in a `VersionChain<V>`. Two implementations exist, selectable at construction time.
+
+#### QueueVersionChain
+- Backed by a `ConcurrentLinkedDeque`
+- `findOverlap()` does a **descending linear scan**
+- Size tracked with an `AtomicLong` to avoid O(N) `size()` calls on the deque
+- Better write performance, lower overhead per version
+
+#### NavigableVersionChain
+- Backed by a `ConcurrentSkipListMap` keyed by `beginTs`
+- `findOverlap()` uses `floorEntry(tBegin)`, O(log N)
+- More expensive writes due to skip list insertion
+- Pays off as version chains grow longer under sustained write load
+
+Both implementations maintain a `MinVisibleEpoch` cache to short-circuit GC scans when no prunable versions exist, a minimal optimization which avoids a full traversal when nothing has changed.
+
+---
+
+### Epoch Tracking
+
+The epoch tracker serves two purposes: assigning monotonically increasing commit epochs, and tracking the minimum `tBegin` of all active transactions so the GC knows which versions are safe to delete.
+
+Three implementations exist:
+
+#### DefaultEpochTracker
+- `ConcurrentHashMap<Long, AtomicLong>` mapping epoch -> active transaction count
+- `currentEpoch()` registers the transaction in the map and increments the counter
+- `leaveEpoch()` decrements; removes the entry when count hits zero
+- `minVisibleEpoch()` streams over the key set to find the minimum
+- Suitable for virtual threads since keys are shared across threads
+
+#### Long2LongEpochTracker
+- Synchronized `Long2LongOpenHashMap` (using fast-util's Long2LongHashMap) maps thread ID -> current epoch
+- No boxing on values — avoids allocation pressure on the hot path
+- `leaveEpoch()` writes a sentinel value (`-1`) rather than removing the entry
+- `minVisibleEpoch()` scans values, skipping sentinels
+- This is best paired with pooled platform threads
+
+#### LongToArrayEpochTracker *(default)*
+- `ConcurrentHashMap<Long, long[]>` mapping thread ID → single-element `long[]`
+- Same thread-local design as `Long2LongEpochTracker` but avoids boxing via the `long[]` trick without fast-utils's hashmap
+- This is best paired with pooled platform threads
+
+---
+
+### GC Thread
+
+Version chains grow unboundedly without cleanup. The GC thread handles pruning old versions that no transaction can ever see again.
+
+**Design:**
+- A single platform daemon thread continuously drains a bounded queue(`LinkedBlockingQueue`) of cleanup requests
+- A `ScheduledExecutorService` (virtual thread) refreshes the cached `minVisibleEpoch` every 100ms
+- Writer transactions submit a cleanup request when `versionChain.size() % threshold == 0`
+
+**Why cached epoch reads:**
+Reading `minVisibleEpoch()` on every write transaction commit was a hotspot. It involves scanning the epoch tracker under contention. Decoupling this into a scheduled read trades perfect GC precision for significantly lower write path overhead. Versions may survive slightly longer than necessary, but correctness is unaffected since `findOverlap()` still skips them.
+
+**Pruning logic:**
+```java
+// A version is prunable if:
+version.endTs < minVisibleEpoch && version != latest
+```
+The latest version is always preserved regardless of its timestamps, since new transactions may still need it. The `MinVisibleEpoch` cache per version chain short-circuits the scan entirely if no version has an `endTs` below the current GC epoch.
+
+---
+
+### Unique Properties
+- **Readers never acquire locks** — unlike the optimistic and pessimistic implementations where readers hold read locks or increment atomic counters, MVCC readers are completely non-blocking. A read is just a version chain traversal with no shared mutable state touched
+- Write-write conflicts are detected at commit time
+- **Abort-on-conflict instead of wait-on-conflict** — when a write lock is already held, the transaction aborts immediately rather than parking. This keeps latency bounded but means abort rates climb sharply under high write contention, unlike other tx map implementations(except Copy-on-Write) which forces writers to wait
+- The queue chain favors writes (O(1) append, cheap traversal for short chains) while the navigable chain favors reads (O(log N) lookup) at the cost of more expensive skip list insertions. 
+- The shared epoch `DefaultEpochTracker` works correctly with any thread model but contends on `computeIfAbsent()` calls, which could kill perf if frequent. The thread keyed trackers (`LongToArray`, `Long2Long`) eliminate that contention entirely since each key is owned by exactly one thread
+
 ## Summary
 
-| Implementation | Isolation Level | When Locks Acquired | Readers Block Writers? | Writers Block Readers? | Probably Best For                                |
-|---|---|---|---|---|--------------------------------------------------|
-| **Optimistic** | READ COMMITTED (per-key SERIALIZABLE) | Reads: eager, Writes: lazy | Yes | Yes | Balanced workloads with strong consistency needs |
-| **Pessimistic** | READ COMMITTED (per-key SERIALIZABLE) | Both lazy | Yes | Yes | Similar to optimistic                            |
-| **Read Uncommitted** | READ UNCOMMITTED | Writes only at validation | No | Yes | Write-heavy and weak consistency is OK           |
-| **Copy-on-Write** | READ COMMITTED | Never (uses CAS) | No | No | Read heavy or small map size                     |
-| **Flat Combined** | SERIALIZABLE | N/A (combiners) | N/A | N/A | High contention, batch benefits                  |
-| **Segmented Flat** | SERIALIZABLE | N/A (per-key combiners) | N/A | N/A | Outperformed by a single flat combined map       |
+| Implementation              | Isolation Level                       | When Locks Acquired        | Readers Block Writers? | Writers Block Readers? | Probably Best For                                |
+|-----------------------------|---------------------------------------|----------------------------|---|---|--------------------------------------------------|
+| **Optimistic**              | READ COMMITTED (per-key SERIALIZABLE) | Reads: eager, Writes: lazy | Yes | Yes | Balanced workloads with strong consistency needs |
+| **Pessimistic**             | READ COMMITTED (per-key SERIALIZABLE) | Both lazy                  | Yes | Yes | Similar to optimistic                            |
+| **Read Uncommitted**        | READ UNCOMMITTED                      | Writes only at validation  | No | Yes | Write-heavy and weak consistency is OK           |
+| **Copy-on-Write**           | READ COMMITTED                        | Never (uses CAS)           | No | No | Read heavy or small map size                     |
+| **Flat Combined**           | SERIALIZABLE                          | N/A (combiners)            | N/A | N/A | High contention, batch benefits                  |
+| **Segmented Flat Combined** | SERIALIZABLE                          | N/A (per-key combiners)    | N/A | N/A | Outperformed by a single flat combined map       |
+| **MVCC**                    | SNAPSHOT                              | Reads: eager Writes: eager | N/A | N/A | Best for read heavy scenarios                    |

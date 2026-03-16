@@ -1,4 +1,7 @@
 # Introduction
+- Date Written: Friday, February 13, 2026.
+
+
 This post walks through the performance journey of an MVCC transactional map I've been building in Java, from a few thousand ops/s to a few million. It's mostly numbers and profiling observations, so if that's not your thing, fair warning.
 You can visit the [GitHub repository](https://github.com/kusoroadeolu/tx-map/tree/mvcc-txmap) if you want to follow along
 
