@@ -1,8 +1,7 @@
 # A Practical Exploration of Transactional Map Implementations in Java
 - Date Written: Monday, March 16, 2026.
 
-
-This writeup documents the transactional maps I’ve implemented over the last few weeks. It mainly focuses on design, lifecycle, and implementation details. No benchmarks or perf numbers included
+This writeup documents the transactional maps I’ve implemented over the last few weeks. It mainly focuses on design, transaction lifecycle, and implementation details. No benchmarks or perf numbers included here
 
 ## 1. Optimistic Transactional Map
 This is mainly inspired by the approach described in [the transactional collections classes paper](https://people.csail.mit.edu/mcarbin/papers/ppopp07.pdf).
@@ -134,10 +133,11 @@ tx.put(key, val)  // Does NOT acquire lock, just records
 - Remove from `GuardedTxSet`
 
 ### Unique Properties
-- Readers use atomic counters, not locks cheaper than lock acquisition
+- Readers use atomic counters, not locks
 - Writers must **drain readers** before proceeding (spin on `readerCount`)
 - The latch mechanism prevents TOCTOU bugs: check status and await in single atomic read
 - More OS context switches due to readers parking/unparking on `CountDownLatch`
+- Basically reinvented my own sync primitive(probably worse tbf)
 
 ---
 
@@ -195,7 +195,7 @@ Then for each operation:
 - Return result
 
 **For CONTAINS:**
-- Check store buffer only (already populated)
+- Check local store buffer only
 
 **For SIZE:**
 - Return `snapshotSize + delta`
@@ -434,9 +434,9 @@ Plain lock which is used as baseline to measure if flat combining actually helps
 
 ---
 
-#### B. SegmentedCombinedTxMap (Partitioned)
+#### B. SegmentedCombinedTxMap
 
-**Key Difference:** Instead of one combiner for the entire map, **one combiner per key + one for SIZE**.
+**Key Difference:** Instead of one combiner for the entire map, **one combiner per key plus one for SIZE**.
 
 **Data Structures:**
 - `ConcurrentMap<K, Combiner<Map<K, V>>>` -> Maps each key to its own combiner
@@ -466,7 +466,7 @@ sizeCombiner.combine(_ -> { /* apply size ops */ });
   Surprisingly, from the benchmarks, a single combiner scales better than a segmented combiner, mainly due to the fact that combiners benefit the fact that batching operations and spinning, amortizes the cost of lock contention, unlike a segmented combiner where batching is less common due to each operation of a transaction mainly working on different keys. However this is just a speculation
 ---
 
-## 6. MVCC Transactional Map
+## 6. MVCC(MVOCC) Transactional Map
 
 ### Isolation Level
 - **Snapshot Isolation** -> each transaction reads from a consistent snapshot taken at begin time
@@ -480,11 +480,11 @@ This is based on the approach described in [the VLDB paper](https://www.vldb.org
 
 ### Core Data Structures
 
-- `ConcurrentMap<K, VersionChain<V>>` — maps each key to its version chain
-- `ConcurrentMap<K, KeyStatus>` — per-key write lock (CAS-based, not a real lock)
-- `EpochTracker` — global epoch counter, tracks active transaction begin epochs for GC
-- `GCThread` — background thread that prunes unreachable versions
-- `AtomicInteger(size)` — approximate global size counter
+- `ConcurrentMap<K, VersionChain<V>>` -> maps each key to its version chain
+- `ConcurrentMap<K, KeyStatus>` -> per-key write lock (CAS-based, not a real lock)
+- `EpochTracker` -> global epoch counter, tracks active transaction begin epochs for GC
+- `GCThread` -> background thread that prunes unreachable versions
+- `AtomicInteger(size)` -> approximate global size counter
 
 ### Transaction Lifecycle
 
@@ -519,9 +519,9 @@ if (seen != overlapAtCommit) abort(); // Someone wrote to this key between tBegi
 //A quick example
 //tBegin = 100, tCommit = 105
 //key = "A", versions = [(0,101,"old"), (102,INF,"new")] //INF = INFINITY
-// tBegin should see version "old", while tCommit should see version "new"
+// tBegin we should see version "old", while at tCommit we should see version "new"
 ```
-This catches read-write conflicts, if any key you read was written by a concurrent transaction between your begin and commit, the transaction is aborted.
+This catches read-write conflicts, if any key you read was written by a concurrent transaction between your begin and commit timestamps/epochs, the transaction is aborted.
 
 #### 4. Commit Phase
 - For each write operation: append a new version to the version chain with `beginTs = tCommit`
@@ -548,13 +548,13 @@ Each key's history is stored in a `VersionChain<V>`. Two independent implementat
 - More expensive writes due to skip list insertion
 - Pays off as version chains grow longer under sustained write load
 
-Both implementations maintain a `MinVisibleEpoch` cache to short-circuit GC scans when no prunable versions exist, a minimal optimization which avoids a full traversal when nothing has changed.
+Both implementations maintain a `MinVisibleEpoch` cache to short circuit redundant GC scans when no prunable versions exist, a minimal optimization which avoids a full traversal when nothing has changed.
 
 ---
 
 ### Epoch Tracking
 
-The epoch tracker serves two purposes: assigning monotonically increasing commit epochs, and tracking the minimum `tBegin` of all active transactions so the GC knows which versions are safe to delete.
+The epoch tracker actually serves two purposes: assigning monotonically increasing commit epochs, and tracking the minimum `tBegin` of all active transactions so the GC knows which versions are not visible to those active transactions
 
 Three implementations exist:
 
@@ -580,10 +580,10 @@ Three implementations exist:
 ---
 
 ### GC Thread
-Version chains grow unboundedly without cleanup. The GC thread handles pruning old versions that no transaction can ever see again.
+Version chains can grow unbounded without cleanup. The GC thread handles pruning old versions that is not visible to any active transaction.
 
 **Design:**
-- A single platform daemon thread continuously drains a bounded queue(`LinkedBlockingQueue`) of cleanup requests
+- A single platform daemon thread continuously drains a bounded queue(`LinkedBlockingQueue`) of cleanup requests. Oddly if a platform thread is not daemon and you're testing with JCStress, it always hangs
 - A `ScheduledExecutorService` (virtual thread) refreshes a cached `minVisibleEpoch` from an `EpochTracker` every 100ms
 - Writer transactions submit a cleanup request when `versionChain.size() % threshold == 0`
 
@@ -613,17 +613,20 @@ The latest version is always preserved regardless of its timestamps, since new t
 | **Optimistic**              | READ COMMITTED (per-key SERIALIZABLE) | Reads: eager, Writes: lazy | Yes | Yes | Balanced workloads with strong consistency needs |
 | **Pessimistic**             | READ COMMITTED (per-key SERIALIZABLE) | Both lazy                  | Yes | Yes | Similar to optimistic                            |
 | **Read Uncommitted**        | READ UNCOMMITTED                      | Writes only at validation  | No | Yes | Write-heavy and weak consistency is OK           |
-| **Copy-on-Write**           | READ COMMITTED                        | Never (uses CAS)           | No | No | Read heavy or small map size                     |
+| **Copy-on-Write**           | READ COMMITTED                        | Never          | No | No | Read heavy or small map size                     |
 | **Flat Combined**           | SERIALIZABLE                          | N/A (combiners)            | N/A | N/A | High contention, batch benefits                  |
 | **Segmented Flat Combined** | SERIALIZABLE                          | N/A (per-key combiners)    | N/A | N/A | Outperformed by a single flat combined map       |
 | **MVCC**                    | SNAPSHOT                              | Reads: eager Writes: eager | N/A | N/A | Best for read heavy scenarios                    |
 
 ## Links/References
+Papers I read to implement some of this
 1. **MVCC Paper:**  https://www.vldb.org/pvldb/vol10/p781-Wu.pdf
 2. **Flat Combining Paper:** https://people.csail.mit.edu/shanir/publications/Flat%20Combining%20SPAA%2010.pdf
 3. **Transactional Collections Paper:** https://people.csail.mit.edu/mcarbin/papers/ppopp07.pdf
-4. **GitHub:**
+
+4. **GitHub:** Source code, JMH bench and benchmark numbers and some explanations can be found here.
 - Optimistic Tx-Map: https://github.com/kusoroadeolu/tx-map
 - Pessimistic/Copy-On-Write/Read Uncommitted Tx-Map: https://github.com/kusoroadeolu/tx-map/tree/pessimistic-txmap
 - Flat Combining Tx-Map: https://github.com/kusoroadeolu/tx-map/tree/fc-txmap
 - MVCC Tx-Map: https://github.com/kusoroadeolu/tx-map/tree/mvcc-txmap
+
